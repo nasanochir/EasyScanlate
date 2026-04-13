@@ -32,3 +32,18 @@ tests/
 !.github/ISSUE_TEMPLATE/
 
 mmtl_to_html.py
+
+# Local env and editor
+.env
+.env.example
+.vscode/
+
+# Virtual environments
+venv/
+.venv/
+
+# Local CLI scripts
+batch_ocr_cli.py
+ocr_cli.py
+ocr_render_cli.py
+ocr_translate_cli.py
