@@ -5,11 +5,12 @@ Based on the optimal configuration from rapidocr_test_gui.py.
 """
 
 from typing import Any, List, Optional, Tuple
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
-from rapidocr import EngineType, LangDet, LangRec, OCRVersion, RapidOCR
+from rapidocr_onnxruntime import RapidOCR
 
 
 def get_rotate_crop_image(img: np.ndarray, points) -> np.ndarray:
@@ -82,15 +83,19 @@ class RapidOCREngine:
 
     def _get_rec_model_and_dict(self, language: str) -> tuple[str, str]:
         """Get recognition model and dictionary paths based on language."""
+        # Use absolute paths relative to this file (app/core/rapid_ocr_engine.py)
+        # Go up 2 levels: app/core -> app -> EasyScanlate
+        base_dir = Path(__file__).parent.parent.parent
+        
         if language == "Korean":
             return (
-                "./OCR/model/korean_PP-OCRv5_rec_mobile_infer.onnx",
-                "./OCR/dict/korean_dict.txt"
+                str(base_dir / "OCR/model/korean_PP-OCRv5_rec_mobile_infer.onnx"),
+                str(base_dir / "OCR/dict/korean_dict.txt")
             )
         else:
             return (
-                "./OCR/model/ch_PP-OCRv5_rec_mobile_infer.onnx",
-                "./OCR/dict/ppocrv5_dict.txt"
+                str(base_dir / "OCR/model/ch_PP-OCRv5_rec_mobile_infer.onnx"),
+                str(base_dir / "OCR/dict/ppocrv5_dict.txt")
             )
 
     def set_language(self, language: str):
@@ -100,28 +105,26 @@ class RapidOCREngine:
 
     def _initialize_engines(self):
         """Initialize separate Detection and Recognition engines."""
+        # Use absolute paths relative to this file (app/core/rapid_ocr_engine.py)
+        # Go up 2 levels: app/core -> app -> EasyScanlate
+        base_dir = Path(__file__).parent.parent.parent
+        
         # 1. Init Detection Engine Only
         self.det_engine = RapidOCR(
-            params={
-                "Det.engine_type": EngineType.ONNXRUNTIME,
-                "Det.model_path": "./OCR/model/ch_PP-OCRv5_mobile_det.onnx",
-                "Global.use_det": True,
-                "Global.use_rec": False,
-                "Global.use_cls": True,
-            }
+            det_model_path=str(base_dir / "OCR/model/ch_PP-OCRv5_mobile_det.onnx"),
+            use_det=True,
+            use_rec=False,
+            use_cls=True,
         )
 
         # 2. Init Recognition Engine Only (language-specific)
-        rec_model_path, rec_dict_path = self._get_rec_model_and_dict(self.language)
+        rec_model_path, rec_keys_path = self._get_rec_model_and_dict(self.language)
         self.rec_engine = RapidOCR(
-            params={
-                "Rec.engine_type": EngineType.ONNXRUNTIME,
-                "Rec.model_path": rec_model_path,
-                "Rec.rec_keys_path": rec_dict_path,
-                "Global.use_det": False,
-                "Global.use_rec": True,
-                "Global.use_cls": False,
-            }
+            rec_model_path=rec_model_path,
+            rec_keys_path=rec_keys_path,
+            use_det=False,
+            use_rec=True,
+            use_cls=False,
         )
 
     def readtext(self, img: np.ndarray) -> List[Tuple[Any, str, float]]:

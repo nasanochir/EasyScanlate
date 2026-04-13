@@ -98,7 +98,7 @@ class TextBoxItem(QGraphicsRectItem):
         # Set word wrap mode to wrap at word boundaries (not character boundaries)
         from PySide6.QtGui import QTextOption
         text_option = self.text_item.document().defaultTextOption()
-        text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        text_option.setWrapMode(QTextOption.WordWrap)
         self.text_item.document().setDefaultTextOption(text_option)
         
         # Connect so outline stroke updates dynamically as the user types
