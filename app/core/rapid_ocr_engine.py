@@ -78,6 +78,7 @@ class RapidOCREngine:
     def __init__(self, language: str = "Korean"):
         self.det_engine: Optional[RapidOCR] = None
         self.rec_engine: Optional[RapidOCR] = None
+        self._fallback_engine: Optional[RapidOCR] = None
         self.language = language
         self._initialize_engines()
 
@@ -102,6 +103,25 @@ class RapidOCREngine:
         """Re-initialize recognition engine with a different language."""
         self.language = language
         self._initialize_engines()
+        self._fallback_engine = None  # reset fallback when primary changes
+
+    def _init_fallback_engine(self):
+        """Lazy-init the secondary language recognition engine for dual-pass."""
+        if hasattr(self, "_fallback_engine") and self._fallback_engine is not None:
+            return
+        fallback_lang = "Chinese" if self.language == "Korean" else "Korean"
+        base_dir = Path(__file__).parent.parent.parent
+        rec_model_path, rec_keys_path = self._get_rec_model_and_dict(fallback_lang)
+        if Path(rec_model_path).exists():
+            self._fallback_engine = RapidOCR(
+                rec_model_path=rec_model_path,
+                rec_keys_path=rec_keys_path,
+                use_det=False,
+                use_rec=True,
+                use_cls=False,
+            )
+        else:
+            self._fallback_engine = None
 
     def _initialize_engines(self):
         """Initialize separate Detection and Recognition engines."""
@@ -142,13 +162,23 @@ class RapidOCREngine:
 
         # Ensure image is in correct format for RapidOCR
         if len(img.shape) == 2:
-            # Grayscale to RGB
             img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
         else:
             img_rgb = img
 
+        # E7: Downscale very large images — detection accuracy drops above ~2000px wide
+        MAX_DET_WIDTH = 2000
+        h_orig, w_orig = img_rgb.shape[:2]
+        if w_orig > MAX_DET_WIDTH:
+            scale = MAX_DET_WIDTH / w_orig
+            img_rgb = cv2.resize(img_rgb, (MAX_DET_WIDTH, int(h_orig * scale)), interpolation=cv2.INTER_AREA)
+
+        # E5: Pad image so text touching panel edges is detected
+        PAD = 20
+        img_padded = cv2.copyMakeBorder(img_rgb, PAD, PAD, PAD, PAD, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+
         # 1. Run Detection Only
-        det_output = self.det_engine(img_rgb)
+        det_output = self.det_engine(img_padded)
 
         boxes = []
 
@@ -177,8 +207,14 @@ class RapidOCREngine:
                 if hasattr(box, "box"):  # Handle object wrapper inside list
                     box = box.box
 
-                # 3. Manual Crop
-                cropped_img = get_rotate_crop_image(img_rgb, box)
+                # E5: shift box coords back by padding offset before cropping original
+                box_shifted = np.array(box, dtype=np.float32)
+                if hasattr(box_shifted, "tolist"):
+                    box_shifted = box_shifted.copy()
+                box_shifted = [[p[0] - PAD, p[1] - PAD] for p in (box_shifted.tolist() if hasattr(box_shifted, "tolist") else box_shifted)]
+
+                # 3. Manual Crop from original (unpadded) image
+                cropped_img = get_rotate_crop_image(img_rgb, box_shifted)
 
                 # 4. Run Recognition on Crop
                 rec_out = self.rec_engine(cropped_img)
@@ -186,20 +222,37 @@ class RapidOCREngine:
                 text = ""
                 score = 0.0
 
-                # Parse Rec output
-                if isinstance(rec_out, tuple):
-                    # standard: (result_list, time)
-                    # result_list is usually [(text, score)]
-                    if rec_out[0] and len(rec_out[0]) > 0:
-                        text, score = rec_out[0][0]
-                elif hasattr(rec_out, "txts"):
-                    # TextRecOutput object
-                    if rec_out.txts and len(rec_out.txts) > 0:
-                        text = rec_out.txts[0]
-                        score = rec_out.scores[0]
-                elif isinstance(rec_out, list) and len(rec_out) > 0:
-                    # Just a list [(text, score)]
-                    text, score = rec_out[0]
+                def _parse_rec(rec_out):
+                    if isinstance(rec_out, tuple):
+                        if rec_out[0] and len(rec_out[0]) > 0:
+                            return rec_out[0][0]
+                    elif hasattr(rec_out, "txts"):
+                        if rec_out.txts and len(rec_out.txts) > 0:
+                            return rec_out.txts[0], rec_out.scores[0]
+                    elif isinstance(rec_out, list) and len(rec_out) > 0:
+                        return rec_out[0]
+                    return "", 0.0
+
+                parsed = _parse_rec(rec_out)
+                if parsed:
+                    text, score = parsed
+
+                # E6: retry with inverted crop if confidence is low (handles white-on-black SFX)
+                if score < 0.5 and cropped_img is not None:
+                    inv_crop = cv2.bitwise_not(cropped_img)
+                    rec_out_inv = self.rec_engine(inv_crop)
+                    parsed_inv = _parse_rec(rec_out_inv)
+                    if parsed_inv and parsed_inv[1] > score:
+                        text, score = parsed_inv
+
+                # E4: fallback to secondary language model if still low confidence
+                if score < 0.5 and cropped_img is not None:
+                    self._init_fallback_engine()
+                    if self._fallback_engine is not None:
+                        rec_out_fb = self._fallback_engine(cropped_img)
+                        parsed_fb = _parse_rec(rec_out_fb)
+                        if parsed_fb and parsed_fb[1] > score:
+                            text, score = parsed_fb
 
                 if text:
                     # Convert box to format expected by RapidOCR: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
@@ -224,14 +277,25 @@ class RapidOCREngine:
             except Exception as inner_e:
                 print(f"Error processing box: {inner_e}")
                 import traceback
-
                 traceback.print_exc()
                 continue
 
-        # Sort results by vertical position (top-to-bottom) for proper reading order
-        # Use the minimum y-coordinate of each box as the sort key
-        results.sort(
-            key=lambda r: min(p[1] for p in r[0]) if len(r[0]) > 0 else float("inf")
-        )
+        # E8: Row-banded reading order — group boxes in same horizontal band, sort x within band
+        def _reading_order_sort(items, row_tol=30):
+            if not items:
+                return items
+            def center_y(r):
+                ys = [p[1] for p in r[0]]
+                return (min(ys) + max(ys)) / 2
+            sorted_by_y = sorted(items, key=center_y)
+            rows, current_row = [], [sorted_by_y[0]]
+            for item in sorted_by_y[1:]:
+                if abs(center_y(item) - center_y(current_row[-1])) <= row_tol:
+                    current_row.append(item)
+                else:
+                    rows.append(sorted(current_row, key=lambda r: min(p[0] for p in r[0])))
+                    current_row = [item]
+            rows.append(sorted(current_row, key=lambda r: min(p[0] for p in r[0])))
+            return [item for row in rows for item in row]
 
-        return results
+        return _reading_order_sort(results)
