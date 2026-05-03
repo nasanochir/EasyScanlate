@@ -10,7 +10,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
-from rapidocr_onnxruntime import RapidOCR
+try:
+    from rapidocr_onnxruntime import RapidOCR
+except ModuleNotFoundError:
+    from rapidocr import RapidOCR
 
 
 def get_rotate_crop_image(img: np.ndarray, points) -> np.ndarray:
@@ -75,11 +78,12 @@ class RapidOCREngine:
     Implements the manual Det -> Crop -> Rec pipeline for optimal results.
     """
 
-    def __init__(self, language: str = "Korean"):
+    def __init__(self, language: str = "Korean", retry_low_confidence: bool = False):
         self.det_engine: Optional[RapidOCR] = None
         self.rec_engine: Optional[RapidOCR] = None
         self._fallback_engine: Optional[RapidOCR] = None
         self.language = language
+        self.retry_low_confidence = retry_low_confidence
         self._initialize_engines()
 
     def _get_rec_model_and_dict(self, language: str) -> tuple[str, str]:
@@ -238,7 +242,7 @@ class RapidOCREngine:
                     text, score = parsed
 
                 # E6: retry with inverted crop if confidence is low (handles white-on-black SFX)
-                if score < 0.5 and cropped_img is not None:
+                if self.retry_low_confidence and score < 0.5 and cropped_img is not None:
                     inv_crop = cv2.bitwise_not(cropped_img)
                     rec_out_inv = self.rec_engine(inv_crop)
                     parsed_inv = _parse_rec(rec_out_inv)
@@ -246,7 +250,7 @@ class RapidOCREngine:
                         text, score = parsed_inv
 
                 # E4: fallback to secondary language model if still low confidence
-                if score < 0.5 and cropped_img is not None:
+                if self.retry_low_confidence and score < 0.5 and cropped_img is not None:
                     self._init_fallback_engine()
                     if self._fallback_engine is not None:
                         rec_out_fb = self._fallback_engine(cropped_img)

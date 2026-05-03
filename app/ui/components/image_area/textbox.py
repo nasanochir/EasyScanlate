@@ -51,7 +51,7 @@ class MainTextItem(QGraphicsTextItem):
 
 class TextBoxItem(QGraphicsRectItem):
     def __init__(self, rect, row_number, text="", original_rect=None, initial_style=None):
-        self.padding = 10
+        self.padding = 16
         bubble_rect = rect.adjusted(-self.padding, -self.padding, self.padding, self.padding)
         super().__init__(QRectF(0, 0, bubble_rect.width(), bubble_rect.height()))
         self.setPos(bubble_rect.x(), bubble_rect.y())
